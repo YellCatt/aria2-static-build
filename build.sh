@@ -216,10 +216,12 @@ prepare_zlib() {
 }
 
 prepare_xz() {
-  xz_tag="$(retry wget -qO- --compression=auto https://tukaani.org/xz/ \| grep "'was released on'" \| head -1 \| cut -d "' '" -f1)"
+  xz_tag="5.8.0"
   xz_latest_url="https://tukaani.org/xz/xz-${xz_tag}.tar.xz"
+  xz_github_url="https://github.com/tukaani-project/xz/releases/download/v${xz_tag}/xz-${xz_tag}.tar.xz"
   if [ ! -f "${DOWNLOADS_DIR}/xz-${xz_tag}.tar.xz" ]; then
-    retry wget -cT10 -O "${DOWNLOADS_DIR}/xz-${xz_tag}.tar.xz.part" "${xz_latest_url}"
+    retry wget -cT10 -O "${DOWNLOADS_DIR}/xz-${xz_tag}.tar.xz.part" "${xz_latest_url}" || \
+    retry wget -cT10 -O "${DOWNLOADS_DIR}/xz-${xz_tag}.tar.xz.part" "${xz_github_url}"
     mv -fv "${DOWNLOADS_DIR}/xz-${xz_tag}.tar.xz.part" "${DOWNLOADS_DIR}/xz-${xz_tag}.tar.xz"
   fi
   mkdir -p "/usr/src/xz-${xz_tag}"
