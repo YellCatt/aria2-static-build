@@ -67,8 +67,8 @@ jobs:
             use_libressl: 1
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
-      - uses: actions/cache@v3
+        uses: actions/checkout@v4
+      - uses: actions/cache@v4
         id: cache
         with:
           path: downloads/
@@ -118,7 +118,7 @@ jobs:
 #           body_path: "${{ github.workspace }}/build_info.md"
 #           append_body: true
       - name : Upload artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARCHIVE_NAME }}
           path: /tmp/${{ env.ARCHIVE_NAME }}
