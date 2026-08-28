@@ -1,6 +1,7 @@
 name: 'Build and Release aria2'
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - "*"
