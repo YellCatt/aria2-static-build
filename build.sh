@@ -194,14 +194,14 @@ prepare_zlib() {
     # Fix mingw build sharedlibdir lost issue
     sed -i 's@^sharedlibdir=.*@sharedlibdir=${libdir}@' "${CROSS_PREFIX}/lib/pkgconfig/zlib.pc"
   else
-    zlib_tag="$(retry wget -qO- --compression=auto https://zlib.net/ \| grep -i "'<FONT.*FONT>'" \| sed -r "'s/.*zlib\s*([^<]+).*/\1/'" \| head -1)"
-    zlib_latest_url="https://zlib.net/zlib-${zlib_tag}.tar.xz"
+    zlib_tag="$(retry wget -qO- --compression=auto https://api.github.com/repos/madler/zlib/releases \| jq -r "'.[0].tag_name'")"
+    zlib_latest_url="https://github.com/madler/zlib/archive/refs/tags/${zlib_tag}.tar.gz"
     if [ ! -f "${DOWNLOADS_DIR}/zlib-${zlib_tag}.tar.gz" ]; then
       retry wget -cT10 -O "${DOWNLOADS_DIR}/zlib-${zlib_tag}.tar.gz.part" "${zlib_latest_url}"
       mv -fv "${DOWNLOADS_DIR}/zlib-${zlib_tag}.tar.gz.part" "${DOWNLOADS_DIR}/zlib-${zlib_tag}.tar.gz"
     fi
     mkdir -p "/usr/src/zlib-${zlib_tag}"
-    tar -Jxf "${DOWNLOADS_DIR}/zlib-${zlib_tag}.tar.gz" --strip-components=1 -C "/usr/src/zlib-${zlib_tag}"
+    tar -zxf "${DOWNLOADS_DIR}/zlib-${zlib_tag}.tar.gz" --strip-components=1 -C "/usr/src/zlib-${zlib_tag}"
     cd "/usr/src/zlib-${zlib_tag}"
     if [ x"${TARGET_HOST}" = xwin ]; then
       make -f win32/Makefile.gcc BINARY_PATH="${CROSS_PREFIX}/bin" INCLUDE_PATH="${CROSS_PREFIX}/include" LIBRARY_PATH="${CROSS_PREFIX}/lib" SHARED_MODE=0 PREFIX="${CROSS_HOST}-" -j$(nproc) install
@@ -239,7 +239,8 @@ prepare_ssl() {
   if [ x"${TARGET_HOST}" != xwin ]; then
     if [ x"${USE_LIBRESSL}" = x1 ]; then
       # libressl
-      libressl_tag="$(retry wget -qO- --compression=auto https://www.libressl.org/index.html \| grep "'release is'" \| tail -1 \| sed -r "'s/.* (.+)<.*>$/\1/'")" libressl_latest_url="https://cloudflare.cdn.openbsd.org/pub/OpenBSD/LibreSSL/libressl-${libressl_tag}.tar.gz"
+      libressl_tag="$(retry wget -qO- --compression=auto https://api.github.com/repos/libressl/libressl/releases \| jq -r "'.[0].tag_name'")"
+      libressl_latest_url="https://github.com/libressl/libressl/archive/refs/tags/${libressl_tag}.tar.gz"
       if [ x"${USE_CHINA_MIRROR}" = x1 ]; then
         libressl_latest_url="https://mirror.sjtu.edu.cn/OpenBSD/LibreSSL/libressl-${libressl_tag}.tar.gz"
       fi
@@ -260,9 +261,9 @@ prepare_ssl() {
       echo "- libressl: ${libressl_ver}, source: ${libressl_latest_url:-cached libressl}" >>"${BUILD_INFO}"
     else
       # openssl
-      openssl_filename="$(retry wget -qO- --compression=auto https://www.openssl.org/source/ \| grep -o "'href=\"openssl-3.*tar.gz\"'" \| grep -o "'[^\"]*.tar.gz'" \| head -1)"
-      openssl_ver="$(echo "${openssl_filename}" | sed -r 's/openssl-(.+)\.tar\.gz/\1/')"
-      openssl_latest_url="https://github.com/openssl/openssl/archive/refs/tags/${openssl_filename}"
+      openssl_filename="$(retry wget -qO- --compression=auto https://api.github.com/repos/openssl/openssl/releases \| jq -r ".[0].tag_name")"
+      openssl_ver="$(echo "${openssl_filename}" | sed -r 's/openssl-(.+)/\1/')"
+      openssl_latest_url="https://github.com/openssl/openssl/archive/refs/tags/${openssl_filename}.tar.gz"
       if [ x"${USE_CHINA_MIRROR}" = x1 ]; then
         openssl_latest_url="https://ghproxy.com/${openssl_latest_url}"
       fi
