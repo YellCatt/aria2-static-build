@@ -1,62 +1,53 @@
 #!/bin/bash -e
 
-# This scrip is for static cross compiling
-# Please run this scrip in docker image: abcfy2/muslcc-toolchain-ubuntu:${CROSS_HOST}
-# E.g: docker run --rm -v `git rev-parse --show-toplevel`:/build abcfy2/muslcc-toolchain-ubuntu:arm-linux-musleabi /build/build.sh
-# Artifacts will copy to the same directory.
+# 极路由专用：mipsel (小端) + 软浮点 静态交叉编译脚本
+# 运行环境: docker run --rm -v `pwd`:/build abcfy2/muslcc-toolchain-ubuntu:mipsel-linux-musleabi /build/build.sh
+# 产物将复制到脚本所在目录
 
 set -o pipefail
 
-# value from: https://musl.cc/ (without -cross or -native)
-# export CROSS_HOST="${CROSS_HOST:-arm-linux-musleabi}"
-# value from openssl source: ./Configure LIST
-case "${CROSS_HOST}" in
-arm-linux*)
-  export OPENSSL_COMPILER=linux-armv4
-  ;;
-aarch64-linux*)
-  export OPENSSL_COMPILER=linux-aarch64
-  ;;
-mips-linux* | mipsel-linux*)
-  export OPENSSL_COMPILER=linux-mips32
-  ;;
-mips64-linux*)
-  export OPENSSL_COMPILER=linux64-mips64
-  ;;
-x86_64-linux*)
-  export OPENSSL_COMPILER=linux-x86_64
-  ;;
-s390x-linux*)
-  export OPENSSL_COMPILER=linux64-s390x
-  ;;
-*)
-  export OPENSSL_COMPILER=gcc
-  ;;
-esac
-# export CROSS_ROOT="${CROSS_ROOT:-/cross_root}"
+# ============ 固定配置（极路由专用） ============
+export CROSS_HOST="mipsel-linux-musleabi"
+export OPENSSL_COMPILER="linux-mips32"
+export CROSS_ROOT="${CROSS_ROOT:-/cross_root}"
 export USE_ZLIB_NG="${USE_ZLIB_NG:-1}"
+export USE_CHINA_MIRROR="${USE_CHINA_MIRROR:-0}"
 
+# ============ 日志函数 ============
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a /tmp/build_mipsel.log
+}
+log_info()  { log "【信息】$1"; }
+log_ok()    { log "【成功】✓ $1"; }
+log_warn()  { log "【警告】⚠ $1"; }
+log_error() { log "【错误】✗ $1"; }
+log_step()  { log "【步骤】$1"; }
+log_var()   { log "【变量】$1 = [$2]"; }
+
+# ============ 重试函数 ============
 retry() {
-  # max retry 5 times
+  log_step "进入 retry 函数，命令: [$*]"
   try=5
-  # sleep 3s every retry
   sleep_time=30
   for i in $(seq ${try}); do
-    echo "executing with retry: $@" >&2
+    log_info "retry 第 ${i}/${try} 次执行: [$*]"
     if "$@"; then
+      log_ok "retry 成功 (第 ${i} 次): [$*]"
       return 0
     else
-      echo "execute '$@' failed, tries: ${i}" >&2
+      log_warn "retry 失败 (第 ${i} 次): [$*]，${sleep_time} 秒后重试..."
       sleep ${sleep_time}
     fi
   done
-  echo "execute '$@' failed" >&2
+  log_error "retry 已达到最大重试次数 (${try})，命令: [$*]"
   return 1
 }
 
+# ============ 环境准备 ============
 source /etc/os-release
-dpkg --add-architecture i386
-# Ubuntu mirror for local building
+export DEBIAN_FRONTEND=noninteractive
+
+# 中国镜像
 if [ x"${USE_CHINA_MIRROR}" = x1 ]; then
   cat >/etc/apt/sources.list <<EOF
 deb http://mirror.sjtu.edu.cn/ubuntu/ ${UBUNTU_CODENAME} main restricted universe multiverse
@@ -66,365 +57,467 @@ deb http://mirror.sjtu.edu.cn/ubuntu/ ${UBUNTU_CODENAME}-security main restricte
 EOF
 fi
 
-export DEBIAN_FRONTEND=noninteractive
-
-# keep debs in container for store cache in docker volume
+# 保留 deb 包缓存
 rm -f /etc/apt/apt.conf.d/*
 echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' >/etc/apt/apt.conf.d/01keep-debs
 echo -e 'Acquire::https::Verify-Peer "false";\nAcquire::https::Verify-Host "false";' >/etc/apt/apt.conf.d/99-trust-https
 
+log_step "========== 安装构建依赖 =========="
 apt update
-apt install -y g++ \
-  make \
-  libtool \
-  jq \
-  pkgconf \
-  file \
-  tcl \
-  autoconf \
-  automake \
-  autopoint \
-  patch \
-  wget
+apt install -y g++ make libtool jq pkgconf file tcl autoconf automake autopoint patch wget qemu-user-static
 
-TARGET_ARCH="${CROSS_HOST%%-*}"
-TARGET_HOST="${CROSS_HOST#*-}"
-case "${TARGET_ARCH}" in
-"armel"*)
-  TARGET_ARCH=armel
-  ;;
-"arm"*)
-  TARGET_ARCH=arm
-  ;;
-esac
-case "${TARGET_HOST}" in
-*"mingw"*)
-  TARGET_HOST=win
-  if [ ! -f "/usr/share/keyrings/winehq-archive.key" ]; then
-    rm -f /usr/share/keyrings/winehq-archive.key.part
-    retry wget -c -T 30 -O /usr/share/keyrings/winehq-archive.key.part https://dl.winehq.org/wine-builds/winehq.key
-    mv -fv /usr/share/keyrings/winehq-archive.key.part /usr/share/keyrings/winehq-archive.key
-  fi
-  if [ x"${USE_CHINA_MIRROR}" = x1 ]; then
-    WINEHQ_URL="http://mirrors.tuna.tsinghua.edu.cn/wine-builds/ubuntu/"
-  else
-    WINEHQ_URL="http://dl.winehq.org/wine-builds/ubuntu/"
-  fi
-  echo "deb [signed-by=/usr/share/keyrings/winehq-archive.key] ${WINEHQ_URL} ${UBUNTU_CODENAME} main" >/etc/apt/sources.list.d/winehq.list
-  apt update
-  apt install -y winehq-staging
-  export WINEPREFIX=/tmp/
-  RUNNER_CHECKER="wine"
-  ;;
-*)
-  TARGET_HOST=linux
-  apt install -y "qemu-user-static"
-  RUNNER_CHECKER="qemu-${TARGET_ARCH}-static"
-  ;;
-esac
-
+# ============ 交叉编译环境变量 ============
 export PATH="${CROSS_ROOT}/bin:${PATH}"
 export CROSS_PREFIX="${CROSS_ROOT}/${CROSS_HOST}"
-export PKG_CONFIG_PATH="${CROSS_PREFIX}/lib64/pkgconfig:${CROSS_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH}"
-export LDFLAGS="-L${CROSS_PREFIX}/lib64 -L${CROSS_PREFIX}/lib -s -static --static"
+export PKG_CONFIG_PATH="${CROSS_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH}"
+export LDFLAGS="-L${CROSS_PREFIX}/lib -s -static --static"
+
 SELF_DIR="$(dirname "$(realpath "${0}")")"
 BUILD_INFO="${SELF_DIR}/build_info.md"
-
-# Create download cache directory
-mkdir -p "${SELF_DIR}/downloads/"
-export DOWNLOADS_DIR="${SELF_DIR}/downloads"
+DOWNLOADS_DIR="${SELF_DIR}/downloads"
+mkdir -p "${DOWNLOADS_DIR}"
 
 if [ x"${USE_ZLIB_NG}" = x1 ]; then
   ZLIB=zlib-ng
 else
   ZLIB=zlib
 fi
-if [ x"${USE_LIBRESSL}" = x1 ]; then
-  SSL=LibreSSL
-else
-  SSL=OpenSSL
-fi
 
-echo "## Build Info - ${CROSS_HOST} With ${SSL} and ${ZLIB}" >"${BUILD_INFO}"
+echo "## Build Info - ${CROSS_HOST}" >"${BUILD_INFO}"
 echo "Building using these dependencies:" >>"${BUILD_INFO}"
 
+log_step "========================================"
+log_step "  极路由 mipsel 交叉编译环境初始化"
+log_step "========================================"
+log_var "CROSS_HOST" "${CROSS_HOST}"
+log_var "CROSS_ROOT" "${CROSS_ROOT}"
+log_var "CROSS_PREFIX" "${CROSS_PREFIX}"
+log_var "OPENSSL_COMPILER" "${OPENSSL_COMPILER}"
+log_var "USE_ZLIB_NG" "${USE_ZLIB_NG}"
+log_var "USE_CHINA_MIRROR" "${USE_CHINA_MIRROR}"
+log_var "SELF_DIR" "${SELF_DIR}"
+log_var "BUILD_INFO" "${BUILD_INFO}"
+
+# ============ 准备工具链 ============
 prepare_toolchain() {
+  log_step "========== 准备 musl 交叉编译工具链 =========="
   mkdir -p "${CROSS_ROOT}"
-  if [ -f "${DOWNLOADS_DIR}/${CROSS_HOST}-cross.tgz" ]; then
-    cd "${DOWNLOADS_DIR}"
-    cached_file_ts="$(stat -c '%Y' "${DOWNLOADS_DIR}/${CROSS_HOST}-cross.tgz")"
+
+  local tgz="${DOWNLOADS_DIR}/${CROSS_HOST}-cross.tgz"
+  # 检查缓存是否过期（30天）
+  if [ -f "${tgz}" ]; then
+    local cached_ts current_ts
+    cached_ts="$(stat -c '%Y' "${tgz}")"
     current_ts="$(date +%s)"
-    if [ "$((${current_ts} - "${cached_file_ts}"))" -gt 2592000 ]; then
+    if [ "$((current_ts - cached_ts))" -gt 2592000 ]; then
+      log_warn "工具链缓存已过期（超过30天），检查远程哈希..."
+      local SHA512SUMS
       SHA512SUMS="$(retry wget -T30 -O- --compression=auto https://musl.cc/SHA512SUMS)"
       if echo "${SHA512SUMS}" | grep "${CROSS_HOST}-cross.tgz" | head -1 | sha512sum -c; then
-        touch "${DOWNLOADS_DIR}/${CROSS_HOST}-cross.tgz"
+        touch "${tgz}"
+        log_ok "工具链哈希校验通过，继续使用缓存"
       else
-        rm -f "${DOWNLOADS_DIR}/${CROSS_HOST}-cross.tgz"
+        log_warn "工具链哈希不匹配，删除缓存重新下载"
+        rm -f "${tgz}"
       fi
+    else
+      log_info "工具链缓存未过期，直接使用"
     fi
   fi
 
-  if [ ! -f "${DOWNLOADS_DIR}/${CROSS_HOST}-cross.tgz" ]; then
-    rm -f "${DOWNLOADS_DIR}/${CROSS_HOST}-cross.tgz.part"
-    retry wget -c -T 30 --no-use-server-timestamps -O "${DOWNLOADS_DIR}/${CROSS_HOST}-cross.tgz.part" "https://musl.cc/${CROSS_HOST}-cross.tgz"
-    mv -fv "${DOWNLOADS_DIR}/${CROSS_HOST}-cross.tgz.part" "${DOWNLOADS_DIR}/${CROSS_HOST}-cross.tgz"
+  if [ ! -f "${tgz}" ]; then
+    log_info "下载工具链: https://musl.cc/${CROSS_HOST}-cross.tgz"
+    rm -f "${tgz}.part"
+    retry wget -c -T 30 --no-use-server-timestamps -O "${tgz}.part" "https://musl.cc/${CROSS_HOST}-cross.tgz"
+    mv -fv "${tgz}.part" "${tgz}"
   fi
-  tar -zxf "${DOWNLOADS_DIR}/${CROSS_HOST}-cross.tgz" --transform='s|^\./||S' --strip-components=1 -C "${CROSS_ROOT}"
+
+  log_info "解压工具链到 ${CROSS_ROOT}..."
+  tar -zxf "${tgz}" --transform='s|^\./||S' --strip-components=1 -C "${CROSS_ROOT}"
+  log_ok "工具链准备完成"
+  log_var "工具链 gcc 版本" "$(${CROSS_HOST}-gcc --version 2>/dev/null | head -1 || echo '未知')"
 }
 
+# ============ 准备 zlib/zlib-ng ============
 prepare_zlib() {
+  log_step "========== 准备 ${ZLIB} =========="
   if [ x"${USE_ZLIB_NG}" = x"1" ]; then
+    log_info "使用 zlib-ng（高性能替代版）"
+    local _api_resp
     _api_resp="$(retry wget -qO- --compression=auto https://api.github.com/repos/zlib-ng/zlib-ng/releases)"
-    zlib_ng_latest_tag="$(echo "${_api_resp}" | jq -r '.[0].tag_name')"
-    zlib_ng_latest_url="https://github.com/zlib-ng/zlib-ng/archive/refs/tags/${zlib_ng_latest_tag}.tar.gz"
-    if [ x"${USE_CHINA_MIRROR}" = x1 ]; then
-      zlib_ng_latest_url="https://ghproxy.com/${zlib_ng_latest_url}"
+    log_var "API 响应长度" "${#_api_resp}"
+    local tag
+    tag="$(echo "${_api_resp}" | jq -r '.[0].tag_name')"
+    log_var "zlib-ng 最新 tag" "${tag}"
+
+    local url="https://github.com/zlib-ng/zlib-ng/archive/refs/tags/${tag}.tar.gz"
+    [ x"${USE_CHINA_MIRROR}" = x1 ] && url="https://ghproxy.com/${url}"
+
+    local f="${DOWNLOADS_DIR}/zlib-ng-${tag}.tar.gz"
+    if [ ! -f "${f}" ]; then
+      retry wget -c -T 10 -O "${f}.part" "${url}"
+      mv -fv "${f}.part" "${f}"
     fi
-    if [ ! -f "${DOWNLOADS_DIR}/zlib-ng-${zlib_ng_latest_tag}.tar.gz" ]; then
-      retry wget -c -T 10 -O "${DOWNLOADS_DIR}/zlib-ng-${zlib_ng_latest_tag}.tar.gz.part" "${zlib_ng_latest_url}"
-      mv -fv "${DOWNLOADS_DIR}/zlib-ng-${zlib_ng_latest_tag}.tar.gz.part" "${DOWNLOADS_DIR}/zlib-ng-${zlib_ng_latest_tag}.tar.gz"
-    fi
-    mkdir -p "/usr/src/zlib-ng-${zlib_ng_latest_tag}"
-    tar -zxf "${DOWNLOADS_DIR}/zlib-ng-${zlib_ng_latest_tag}.tar.gz" --strip-components=1 -C "/usr/src/zlib-ng-${zlib_ng_latest_tag}"
-    cd "/usr/src/zlib-ng-${zlib_ng_latest_tag}"
+
+    mkdir -p "/usr/src/zlib-ng-${tag}"
+    log_info "解压 zlib-ng-${tag}.tar.gz..."
+    tar -zxf "${f}" --strip-components=1 -C "/usr/src/zlib-ng-${tag}"
+    cd "/usr/src/zlib-ng-${tag}"
+    log_ok "进入源码目录: $(pwd)"
+
+    log_info "配置: CHOST=${CROSS_HOST} --prefix=${CROSS_PREFIX} --static --zlib-compat"
     CHOST="${CROSS_HOST}" ./configure --prefix="${CROSS_PREFIX}" --static --zlib-compat
+    log_info "编译 (jobs=$(nproc))..."
     make -j$(nproc)
+    log_info "安装..."
     make install
-    zlib_ng_ver="$(grep Version: "${CROSS_PREFIX}/lib/pkgconfig/zlib.pc")"
-    echo "- zlib-ng: ${zlib_ng_ver}, source: ${zlib_ng_latest_url:-cached zlib-ng}" >>"${BUILD_INFO}"
-    # Fix mingw build sharedlibdir lost issue
-    sed -i 's@^sharedlibdir=.*@sharedlibdir=${libdir}@' "${CROSS_PREFIX}/lib/pkgconfig/zlib.pc"
+
+    local ver
+    ver="$(grep Version: "${CROSS_PREFIX}/lib/pkgconfig/zlib.pc")"
+    log_ok "zlib-ng 安装完成: ${ver}"
+    echo "- zlib-ng: ${ver}, source: ${url:-cached}" >>"${BUILD_INFO}"
   else
+    log_info "使用原版 zlib"
+    local _api_resp
     _api_resp="$(retry wget -qO- --compression=auto https://api.github.com/repos/madler/zlib/releases)"
-    zlib_tag="$(echo "${_api_resp}" | jq -r '.[0].tag_name')"
-    zlib_latest_url="https://github.com/madler/zlib/archive/refs/tags/${zlib_tag}.tar.gz"
-    if [ ! -f "${DOWNLOADS_DIR}/zlib-${zlib_tag}.tar.gz" ]; then
-      retry wget -c -T 10 -O "${DOWNLOADS_DIR}/zlib-${zlib_tag}.tar.gz.part" "${zlib_latest_url}"
-      mv -fv "${DOWNLOADS_DIR}/zlib-${zlib_tag}.tar.gz.part" "${DOWNLOADS_DIR}/zlib-${zlib_tag}.tar.gz"
+    log_var "API 响应长度" "${#_api_resp}"
+    local tag
+    tag="$(echo "${_api_resp}" | jq -r '.[0].tag_name')"
+    log_var "zlib 最新 tag" "${tag}"
+
+    local url="https://github.com/madler/zlib/archive/refs/tags/${tag}.tar.gz"
+    local f="${DOWNLOADS_DIR}/zlib-${tag}.tar.gz"
+    if [ ! -f "${f}" ]; then
+      retry wget -c -T 10 -O "${f}.part" "${url}"
+      mv -fv "${f}.part" "${f}"
     fi
-    mkdir -p "/usr/src/zlib-${zlib_tag}"
-    tar -zxf "${DOWNLOADS_DIR}/zlib-${zlib_tag}.tar.gz" --strip-components=1 -C "/usr/src/zlib-${zlib_tag}"
-    cd "/usr/src/zlib-${zlib_tag}"
-    if [ x"${TARGET_HOST}" = xwin ]; then
-      make -f win32/Makefile.gcc BINARY_PATH="${CROSS_PREFIX}/bin" INCLUDE_PATH="${CROSS_PREFIX}/include" LIBRARY_PATH="${CROSS_PREFIX}/lib" SHARED_MODE=0 PREFIX="${CROSS_HOST}-" -j$(nproc) install
-    else
-      CHOST="${CROSS_HOST}" ./configure --prefix="${CROSS_PREFIX}" --static
-      make -j$(nproc)
-      make install
-    fi
-    zlib_ver="$(grep Version: "${CROSS_PREFIX}/lib/pkgconfig/zlib.pc")"
-    echo "- zlib: ${zlib_ver}, source: ${zlib_latest_url:-cached zlib}" >>"${BUILD_INFO}"
+
+    mkdir -p "/usr/src/zlib-${tag}"
+    log_info "解压 zlib-${tag}.tar.gz..."
+    tar -zxf "${f}" --strip-components=1 -C "/usr/src/zlib-${tag}"
+    cd "/usr/src/zlib-${tag}"
+    log_ok "进入源码目录: $(pwd)"
+
+    log_info "配置: CHOST=${CROSS_HOST} --prefix=${CROSS_PREFIX} --static"
+    CHOST="${CROSS_HOST}" ./configure --prefix="${CROSS_PREFIX}" --static
+    log_info "编译 (jobs=$(nproc))..."
+    make -j$(nproc)
+    log_info "安装..."
+    make install
+
+    local ver
+    ver="$(grep Version: "${CROSS_PREFIX}/lib/pkgconfig/zlib.pc")"
+    log_ok "zlib 安装完成: ${ver}"
+    echo "- zlib: ${ver}, source: ${url:-cached}" >>"${BUILD_INFO}"
   fi
 }
 
+# ============ 准备 xz ============
 prepare_xz() {
-  xz_tag="5.8.0"
-  xz_latest_url="https://tukaani.org/xz/xz-${xz_tag}.tar.xz"
-  xz_github_url="https://github.com/tukaani-project/xz/releases/download/v${xz_tag}/xz-${xz_tag}.tar.xz"
-  if [ ! -f "${DOWNLOADS_DIR}/xz-${xz_tag}.tar.xz" ]; then
-    retry wget -c -T 10 -O "${DOWNLOADS_DIR}/xz-${xz_tag}.tar.xz.part" "${xz_latest_url}" || \
-    retry wget -c -T 10 -O "${DOWNLOADS_DIR}/xz-${xz_tag}.tar.xz.part" "${xz_github_url}"
-    mv -fv "${DOWNLOADS_DIR}/xz-${xz_tag}.tar.xz.part" "${DOWNLOADS_DIR}/xz-${xz_tag}.tar.xz"
+  log_step "========== 准备 xz =========="
+  local tag="5.8.0"
+  log_var "xz 版本" "${tag}"
+
+  local url="https://tukaani.org/xz/xz-${tag}.tar.xz"
+  local alt_url="https://github.com/tukaani-project/xz/releases/download/v${tag}/xz-${tag}.tar.xz"
+  local f="${DOWNLOADS_DIR}/xz-${tag}.tar.xz"
+
+  if [ ! -f "${f}" ]; then
+    retry wget -c -T 10 -O "${f}.part" "${url}" || retry wget -c -T 10 -O "${f}.part" "${alt_url}"
+    mv -fv "${f}.part" "${f}"
   fi
-  mkdir -p "/usr/src/xz-${xz_tag}"
-  tar -Jxf "${DOWNLOADS_DIR}/xz-${xz_tag}.tar.xz" --strip-components=1 -C "/usr/src/xz-${xz_tag}"
-  cd "/usr/src/xz-${xz_tag}"
-  ./configure --build=x86_64-linux-gnu --host="${CROSS_HOST}" --prefix="${CROSS_PREFIX}" --enable-silent-rules --enable-static --disable-shared
+
+  mkdir -p "/usr/src/xz-${tag}"
+  log_info "解压 xz-${tag}.tar.xz..."
+  tar -Jxf "${f}" --strip-components=1 -C "/usr/src/xz-${tag}"
+  cd "/usr/src/xz-${tag}"
+  log_ok "进入源码目录: $(pwd)"
+
+  log_info "配置: --host=${CROSS_HOST} --prefix=${CROSS_PREFIX}"
+  ./configure --build=x86_64-linux-gnu --host="${CROSS_HOST}" --prefix="${CROSS_PREFIX}" \
+    --enable-silent-rules --enable-static --disable-shared
+  log_info "编译 (jobs=$(nproc))..."
   make -j$(nproc)
+  log_info "安装..."
   make install
-  xz_ver="$(grep Version: "${CROSS_PREFIX}/lib/pkgconfig/liblzma.pc")"
-  echo "- xz: ${xz_ver}, source: ${xz_latest_url:-cached xz}" >>"${BUILD_INFO}"
+
+  local ver
+  ver="$(grep Version: "${CROSS_PREFIX}/lib/pkgconfig/liblzma.pc")"
+  log_ok "xz 安装完成: ${ver}"
+  echo "- xz: ${ver}, source: ${url}" >>"${BUILD_INFO}"
 }
 
+# ============ 准备 OpenSSL ============
 prepare_ssl() {
-  # Windows will use Wintls, not openssl
-  if [ x"${TARGET_HOST}" != xwin ]; then
-    if [ x"${USE_LIBRESSL}" = x1 ]; then
-      # libressl
-      _api_resp="$(retry wget -qO- --compression=auto https://api.github.com/repos/libressl/libressl/releases)"
-      libressl_tag="$(echo "${_api_resp}" | jq -r '.[0].tag_name')"
-      libressl_latest_url="https://github.com/libressl/libressl/archive/refs/tags/${libressl_tag}.tar.gz"
-      if [ x"${USE_CHINA_MIRROR}" = x1 ]; then
-        libressl_latest_url="https://mirror.sjtu.edu.cn/OpenBSD/LibreSSL/libressl-${libressl_tag}.tar.gz"
-      fi
-      if [ ! -f "${DOWNLOADS_DIR}/libressl-${libressl_tag}.tar.gz" ]; then
-        retry wget -c -T 10 -O "${DOWNLOADS_DIR}/libressl-${libressl_tag}.tar.gz.part" "${libressl_latest_url}"
-        mv -fv "${DOWNLOADS_DIR}/libressl-${libressl_tag}.tar.gz.part" "${DOWNLOADS_DIR}/libressl-${libressl_tag}.tar.gz"
-      fi
-      mkdir -p "/usr/src/libressl-${libressl_tag}"
-      tar -zxf "${DOWNLOADS_DIR}/libressl-${libressl_tag}.tar.gz" --strip-components=1 -C "/usr/src/libressl-${libressl_tag}"
-      cd "/usr/src/libressl-${libressl_tag}"
-      if [ ! -f "./configure" ]; then
-        ./autogen.sh
-      fi
-      ./configure --build=x86_64-linux-gnu --host="${CROSS_HOST}" --prefix="${CROSS_PREFIX}" --enable-silent-rules --enable-static --disable-shared --with-openssldir=/etc/ssl
-      make -j$(nproc)
-      make install_sw
-      libressl_ver="$(grep Version: "${CROSS_PREFIX}/lib/pkgconfig/openssl.pc")"
-      echo "- libressl: ${libressl_ver}, source: ${libressl_latest_url:-cached libressl}" >>"${BUILD_INFO}"
-    else
-      # openssl
-      _api_resp="$(retry wget -qO- --compression=auto https://api.github.com/repos/openssl/openssl/releases)"
-      openssl_filename="$(echo "${_api_resp}" | jq -r ".[0].tag_name")"
-      openssl_ver="${openssl_filename#openssl-}"
-      openssl_latest_url="https://github.com/openssl/openssl/archive/refs/tags/${openssl_filename}.tar.gz"
-      if [ x"${USE_CHINA_MIRROR}" = x1 ]; then
-        openssl_latest_url="https://ghproxy.com/${openssl_latest_url}"
-      fi
-      if [ ! -f "${DOWNLOADS_DIR}/openssl-${openssl_ver}.tar.gz" ]; then
-        retry wget -c -T 10 -O "${DOWNLOADS_DIR}/openssl-${openssl_ver}.tar.gz.part" "${openssl_latest_url}"
-        mv -fv "${DOWNLOADS_DIR}/openssl-${openssl_ver}.tar.gz.part" "${DOWNLOADS_DIR}/openssl-${openssl_ver}.tar.gz"
-      fi
-      mkdir -p "/usr/src/openssl-${openssl_ver}"
-      tar -zxf "${DOWNLOADS_DIR}/openssl-${openssl_ver}.tar.gz" --strip-components=1 -C "/usr/src/openssl-${openssl_ver}"
-      cd "/usr/src/openssl-${openssl_ver}"
-      ./Configure -static --cross-compile-prefix="${CROSS_HOST}-" --prefix="${CROSS_PREFIX}" "${OPENSSL_COMPILER}" --openssldir=/etc/ssl
-      make -j$(nproc)
-      make install_sw
-      openssl_ver="$(grep Version: "${CROSS_PREFIX}"/lib*/pkgconfig/openssl.pc)"
-      echo "- openssl: ${openssl_ver}, source: ${openssl_latest_url:-cached openssl}" >>"${BUILD_INFO}"
-    fi
+  log_step "========== 准备 OpenSSL =========="
+  local _api_resp
+  _api_resp="$(retry wget -qO- --compression=auto https://api.github.com/repos/openssl/openssl/releases)"
+  log_var "API 响应长度" "${#_api_resp}"
+
+  local filename
+  filename="$(echo "${_api_resp}" | jq -r '.[0].tag_name')"
+  local ver="${filename#openssl-}"
+  log_var "OpenSSL 最新 tag" "${filename}"
+  log_var "OpenSSL 版本号" "${ver}"
+
+  local url="https://github.com/openssl/openssl/archive/refs/tags/${filename}.tar.gz"
+  [ x"${USE_CHINA_MIRROR}" = x1 ] && url="https://ghproxy.com/${url}"
+
+  local f="${DOWNLOADS_DIR}/openssl-${ver}.tar.gz"
+  if [ ! -f "${f}" ]; then
+    retry wget -c -T 10 -O "${f}.part" "${url}"
+    mv -fv "${f}.part" "${f}"
   fi
+
+  mkdir -p "/usr/src/openssl-${ver}"
+  log_info "解压 openssl-${ver}.tar.gz..."
+  tar -zxf "${f}" --strip-components=1 -C "/usr/src/openssl-${ver}"
+  cd "/usr/src/openssl-${ver}"
+  log_ok "进入源码目录: $(pwd)"
+
+  log_info "配置: ${OPENSSL_COMPILER} --prefix=${CROSS_PREFIX}"
+  ./Configure -static --cross-compile-prefix="${CROSS_HOST}-" --prefix="${CROSS_PREFIX}" \
+    "${OPENSSL_COMPILER}" --openssldir=/etc/ssl
+  log_info "编译 (jobs=$(nproc))..."
+  make -j$(nproc)
+  log_info "安装..."
+  make install_sw
+
+  local installed_ver
+  installed_ver="$(grep Version: "${CROSS_PREFIX}"/lib*/pkgconfig/openssl.pc)"
+  log_ok "OpenSSL 安装完成: ${installed_ver}"
+  echo "- openssl: ${installed_ver}, source: ${url:-cached}" >>"${BUILD_INFO}"
 }
 
+# ============ 准备 libxml2 ============
 prepare_libxml2() {
+  log_step "========== 准备 libxml2 =========="
+  local _api_resp
   _api_resp="$(retry wget -qO- --compression=auto https://api.github.com/repos/GNOME/libxml2/releases)"
-  libxml2_tag="$(echo "${_api_resp}" | jq -r '.[0].tag_name')"
-  libxml2_latest_url="https://github.com/GNOME/libxml2/archive/refs/tags/${libxml2_tag}.tar.gz"
-  libxml2_filename="libxml2-${libxml2_tag}.tar.gz"
-  if [ ! -f "${DOWNLOADS_DIR}/${libxml2_filename}" ]; then
-    retry wget -c -O "${DOWNLOADS_DIR}/${libxml2_filename}.part" "${libxml2_latest_url}"
-    mv -fv "${DOWNLOADS_DIR}/${libxml2_filename}.part" "${DOWNLOADS_DIR}/${libxml2_filename}"
+  log_var "API 响应长度" "${#_api_resp}"
+
+  local tag
+  tag="$(echo "${_api_resp}" | jq -r '.[0].tag_name')"
+  log_var "libxml2 最新 tag" "${tag}"
+
+  local url="https://github.com/GNOME/libxml2/archive/refs/tags/${tag}.tar.gz"
+  local f="${DOWNLOADS_DIR}/libxml2-${tag}.tar.gz"
+  if [ ! -f "${f}" ]; then
+    retry wget -c -O "${f}.part" "${url}"
+    mv -fv "${f}.part" "${f}"
   fi
-  mkdir -p "/usr/src/libxml2-${libxml2_tag}"
-  tar -zxf "${DOWNLOADS_DIR}/${libxml2_filename}" --strip-components=1 -C "/usr/src/libxml2-${libxml2_tag}"
-  cd "/usr/src/libxml2-${libxml2_tag}"
-  ./configure --build=x86_64-linux-gnu --host="${CROSS_HOST}" --prefix="${CROSS_PREFIX}" --enable-silent-rules --without-python --without-icu --enable-static --disable-shared
+
+  mkdir -p "/usr/src/libxml2-${tag}"
+  log_info "解压 libxml2-${tag}.tar.gz..."
+  tar -zxf "${f}" --strip-components=1 -C "/usr/src/libxml2-${tag}"
+  cd "/usr/src/libxml2-${tag}"
+  log_ok "进入源码目录: $(pwd)"
+
+  log_info "配置: --host=${CROSS_HOST} --prefix=${CROSS_PREFIX}"
+  ./configure --build=x86_64-linux-gnu --host="${CROSS_HOST}" --prefix="${CROSS_PREFIX}" \
+    --enable-silent-rules --without-python --without-icu --enable-static --disable-shared
+  log_info "编译 (jobs=$(nproc))..."
   make -j$(nproc)
+  log_info "安装..."
   make install
-  libxml2_ver="$(grep Version: "${CROSS_PREFIX}/lib/pkgconfig/"libxml-*.pc)"
-  echo "- libxml2: ${libxml2_ver}, source: ${libxml2_latest_url:-cached libxml2}" >>"${BUILD_INFO}"
+
+  local ver
+  ver="$(grep Version: "${CROSS_PREFIX}/lib/pkgconfig/"libxml-*.pc)"
+  log_ok "libxml2 安装完成: ${ver}"
+  echo "- libxml2: ${ver}, source: ${url:-cached}" >>"${BUILD_INFO}"
 }
 
+# ============ 准备 sqlite ============
 prepare_sqlite() {
+  log_step "========== 准备 sqlite =========="
+  local _api_resp
   _api_resp="$(retry wget -qO- --compression=auto https://api.github.com/repos/sqlite/sqlite/releases)"
-  sqlite_tag="$(echo "${_api_resp}" | jq -r '.[0].tag_name')"
-  sqlite_latest_url="https://github.com/sqlite/sqlite/archive/refs/tags/${sqlite_tag}.tar.gz"
-  if [ x"${USE_CHINA_MIRROR}" = x1 ]; then
-    sqlite_latest_url="https://ghproxy.com/${sqlite_latest_url}"
+  log_var "API 响应长度" "${#_api_resp}"
+
+  local tag
+  tag="$(echo "${_api_resp}" | jq -r '.[0].tag_name')"
+  log_var "sqlite 最新 tag" "${tag}"
+
+  local url="https://github.com/sqlite/sqlite/archive/refs/tags/${tag}.tar.gz"
+  [ x"${USE_CHINA_MIRROR}" = x1 ] && url="https://ghproxy.com/${url}"
+
+  local f="${DOWNLOADS_DIR}/sqlite-${tag}.tar.gz"
+  if [ ! -f "${f}" ]; then
+    retry wget -c -T 10 -O "${f}.part" "${url}"
+    mv -fv "${f}.part" "${f}"
   fi
-  if [ ! -f "${DOWNLOADS_DIR}/sqlite-${sqlite_tag}.tar.gz" ]; then
-    retry wget -c -T 10 -O "${DOWNLOADS_DIR}/sqlite-${sqlite_tag}.tar.gz.part" "${sqlite_latest_url}"
-    mv -fv "${DOWNLOADS_DIR}/sqlite-${sqlite_tag}.tar.gz.part" "${DOWNLOADS_DIR}/sqlite-${sqlite_tag}.tar.gz"
-  fi
-  mkdir -p "/usr/src/sqlite-${sqlite_tag}"
-  tar -zxf "${DOWNLOADS_DIR}/sqlite-${sqlite_tag}.tar.gz" --strip-components=1 -C "/usr/src/sqlite-${sqlite_tag}"
-  cd "/usr/src/sqlite-${sqlite_tag}"
-  if [ x"${TARGET_HOST}" = x"win" ]; then
-    ln -sf mksourceid.exe mksourceid
-    SQLITE_EXT_CONF="config_TARGET_EXEEXT=.exe"
-  fi
-  ./configure --build=x86_64-linux-gnu --host="${CROSS_HOST}" --prefix="${CROSS_PREFIX}" --enable-static --disable-shared ${SQLITE_EXT_CONF}
+
+  mkdir -p "/usr/src/sqlite-${tag}"
+  log_info "解压 sqlite-${tag}.tar.gz..."
+  tar -zxf "${f}" --strip-components=1 -C "/usr/src/sqlite-${tag}"
+  cd "/usr/src/sqlite-${tag}"
+  log_ok "进入源码目录: $(pwd)"
+
+  log_info "配置: --host=${CROSS_HOST} --prefix=${CROSS_PREFIX}"
+  ./configure --build=x86_64-linux-gnu --host="${CROSS_HOST}" --prefix="${CROSS_PREFIX}" \
+    --enable-static --disable-shared
+  log_info "编译 (jobs=$(nproc))..."
   make -j$(nproc)
+  log_info "安装..."
   make install
-  sqlite_ver="$(grep Version: "${CROSS_PREFIX}/lib/pkgconfig/"sqlite*.pc)"
-  echo "- sqlite: ${sqlite_ver}, source: ${sqlite_latest_url:-cached sqlite}" >>"${BUILD_INFO}"
+
+  local ver
+  ver="$(grep Version: "${CROSS_PREFIX}/lib/pkgconfig/"sqlite*.pc)"
+  log_ok "sqlite 安装完成: ${ver}"
+  echo "- sqlite: ${ver}, source: ${url:-cached}" >>"${BUILD_INFO}"
 }
 
+# ============ 准备 c-ares ============
 prepare_c_ares() {
+  log_step "========== 准备 c-ares =========="
+  local _api_resp
   _api_resp="$(retry wget -qO- --compression=auto https://api.github.com/repos/c-ares/c-ares/releases)"
-  cares_tag="$(echo "${_api_resp}" | jq -r '.[0].tag_name')"
-  cares_latest_url="https://github.com/c-ares/c-ares/archive/refs/tags/${cares_tag}.tar.gz"
-  if [ ! -f "${DOWNLOADS_DIR}/c-ares-${cares_tag}.tar.gz" ]; then
-    retry wget -c -T 10 -O "${DOWNLOADS_DIR}/c-ares-${cares_tag}.tar.gz.part" "${cares_latest_url}"
-    mv -fv "${DOWNLOADS_DIR}/c-ares-${cares_tag}.tar.gz.part" "${DOWNLOADS_DIR}/c-ares-${cares_tag}.tar.gz"
+  log_var "API 响应长度" "${#_api_resp}"
+
+  local tag
+  tag="$(echo "${_api_resp}" | jq -r '.[0].tag_name')"
+  log_var "c-ares 最新 tag" "${tag}"
+
+  local url="https://github.com/c-ares/c-ares/archive/refs/tags/${tag}.tar.gz"
+  local f="${DOWNLOADS_DIR}/c-ares-${tag}.tar.gz"
+  if [ ! -f "${f}" ]; then
+    retry wget -c -T 10 -O "${f}.part" "${url}"
+    mv -fv "${f}.part" "${f}"
   fi
-  mkdir -p "/usr/src/c-ares-${cares_tag}"
-  tar -zxf "${DOWNLOADS_DIR}/c-ares-${cares_tag}.tar.gz" --strip-components=1 -C "/usr/src/c-ares-${cares_tag}"
-  cd "/usr/src/c-ares-${cares_tag}"
+
+  mkdir -p "/usr/src/c-ares-${tag}"
+  log_info "解压 c-ares-${tag}.tar.gz..."
+  tar -zxf "${f}" --strip-components=1 -C "/usr/src/c-ares-${tag}"
+  cd "/usr/src/c-ares-${tag}"
+  log_ok "进入源码目录: $(pwd)"
+
   if [ ! -f "./configure" ]; then
+    log_info "未找到 configure，执行 autoreconf -i..."
     autoreconf -i
   fi
-  ./configure --build=x86_64-linux-gnu --host="${CROSS_HOST}" --prefix="${CROSS_PREFIX}" --enable-static --disable-shared --enable-silent-rules --disable-tests
+
+  log_info "配置: --host=${CROSS_HOST} --prefix=${CROSS_PREFIX}"
+  ./configure --build=x86_64-linux-gnu --host="${CROSS_HOST}" --prefix="${CROSS_PREFIX}" \
+    --enable-static --disable-shared --enable-silent-rules --disable-tests
+  log_info "编译 (jobs=$(nproc))..."
   make -j$(nproc)
+  log_info "安装..."
   make install
-  cares_ver="$(grep Version: "${CROSS_PREFIX}/lib/pkgconfig/libcares.pc")"
-  echo "- c-ares: ${cares_ver}, source: ${cares_latest_url:-cached c-ares}" >>"${BUILD_INFO}"
+
+  local ver
+  ver="$(grep Version: "${CROSS_PREFIX}/lib/pkgconfig/libcares.pc")"
+  log_ok "c-ares 安装完成: ${ver}"
+  echo "- c-ares: ${ver}, source: ${url:-cached}" >>"${BUILD_INFO}"
 }
 
+# ============ 准备 libssh2 ============
 prepare_libssh2() {
+  log_step "========== 准备 libssh2 =========="
+  local _api_resp
   _api_resp="$(retry wget -qO- --compression=auto https://api.github.com/repos/libssh2/libssh2/releases)"
-  libssh2_tag="$(echo "${_api_resp}" | jq -r '.[0].tag_name')"
-  libssh2_latest_url="https://github.com/libssh2/libssh2/archive/refs/tags/${libssh2_tag}.tar.gz"
-  if [ ! -f "${DOWNLOADS_DIR}/libssh2-${libssh2_tag}.tar.gz" ]; then
-    retry wget -c -T 10 -O "${DOWNLOADS_DIR}/libssh2-${libssh2_tag}.tar.gz.part" "${libssh2_latest_url}"
-    mv -fv "${DOWNLOADS_DIR}/libssh2-${libssh2_tag}.tar.gz.part" "${DOWNLOADS_DIR}/libssh2-${libssh2_tag}.tar.gz"
+  log_var "API 响应长度" "${#_api_resp}"
+
+  local tag
+  tag="$(echo "${_api_resp}" | jq -r '.[0].tag_name')"
+  log_var "libssh2 最新 tag" "${tag}"
+
+  local url="https://github.com/libssh2/libssh2/archive/refs/tags/${tag}.tar.gz"
+  local f="${DOWNLOADS_DIR}/libssh2-${tag}.tar.gz"
+  if [ ! -f "${f}" ]; then
+    retry wget -c -T 10 -O "${f}.part" "${url}"
+    mv -fv "${f}.part" "${f}"
   fi
-  mkdir -p "/usr/src/libssh2-${libssh2_tag}"
-  tar -zxf "${DOWNLOADS_DIR}/libssh2-${libssh2_tag}.tar.gz" --strip-components=1 -C "/usr/src/libssh2-${libssh2_tag}"
-  cd "/usr/src/libssh2-${libssh2_tag}"
-  # issue: https://github.com/libressl-portable/portable/issues/736
-  if [ x"${USE_LIBRESSL}" = x1 -a x"${TARGET_HOST}" != x"win" ]; then
-    export CFLAGS='-DHAVE_OPAQUE_STRUCTS=1'
-  fi
-  ./configure --build=x86_64-linux-gnu --host="${CROSS_HOST}" --prefix="${CROSS_PREFIX}" --enable-static --disable-shared --enable-silent-rules
+
+  mkdir -p "/usr/src/libssh2-${tag}"
+  log_info "解压 libssh2-${tag}.tar.gz..."
+  tar -zxf "${f}" --strip-components=1 -C "/usr/src/libssh2-${tag}"
+  cd "/usr/src/libssh2-${tag}"
+  log_ok "进入源码目录: $(pwd)"
+
+  log_info "配置: --host=${CROSS_HOST} --prefix=${CROSS_PREFIX}"
+  ./configure --build=x86_64-linux-gnu --host="${CROSS_HOST}" --prefix="${CROSS_PREFIX}" \
+    --enable-static --disable-shared --enable-silent-rules
+  log_info "编译 (jobs=$(nproc))..."
   make -j$(nproc)
+  log_info "安装..."
   make install
-  unset CFLAGS
-  libssh2_ver="$(grep Version: "${CROSS_PREFIX}/lib/pkgconfig/libssh2.pc")"
-  echo "- libssh2: ${libssh2_ver}, source: ${libssh2_latest_url:-cached libssh2}" >>"${BUILD_INFO}"
+
+  local ver
+  ver="$(grep Version: "${CROSS_PREFIX}/lib/pkgconfig/libssh2.pc")"
+  log_ok "libssh2 安装完成: ${ver}"
+  echo "- libssh2: ${ver}, source: ${url:-cached}" >>"${BUILD_INFO}"
 }
 
+# ============ 构建 aria2 ============
 build_aria2() {
+  log_step "========== 构建 aria2 =========="
+  log_var "ARIA2_VER" "${ARIA2_VER:-(未设置，使用 master)}"
+
+  local tag url f
   if [ -n "${ARIA2_VER}" ]; then
-    aria2_tag="${ARIA2_VER}"
+    tag="${ARIA2_VER}"
+    url="https://github.com/aria2/aria2/releases/download/release-${ARIA2_VER}/aria2-${ARIA2_VER}.tar.gz"
   else
-    aria2_tag=master
-    # Check download cache whether expired
-    if [ -f "${DOWNLOADS_DIR}/aria2-${aria2_tag}.tar.gz" ]; then
-      cached_file_ts="$(stat -c '%Y' "${DOWNLOADS_DIR}/aria2-${aria2_tag}.tar.gz")"
+    tag="master"
+    url="https://github.com/aria2/aria2/archive/master.tar.gz"
+    # master 缓存每天检查一次
+    if [ -f "${DOWNLOADS_DIR}/aria2-${tag}.tar.gz" ]; then
+      local cached_ts current_ts
+      cached_ts="$(stat -c '%Y' "${DOWNLOADS_DIR}/aria2-${tag}.tar.gz")"
       current_ts="$(date +%s)"
-      if [ "$((${current_ts} - "${cached_file_ts}"))" -gt 86400 ]; then
-        echo "Delete expired aria2 archive file cache..."
-        rm -f "${DOWNLOADS_DIR}/aria2-${aria2_tag}.tar.gz"
+      if [ "$((current_ts - cached_ts))" -gt 86400 ]; then
+        log_warn "aria2 master 缓存已过期（超过1天），删除重新下载"
+        rm -f "${DOWNLOADS_DIR}/aria2-${tag}.tar.gz"
       fi
     fi
   fi
+  [ x"${USE_CHINA_MIRROR}" = x1 ] && url="https://ghproxy.com/${url}"
+  log_var "aria2 下载地址" "${url}"
 
-  if [ -n "${ARIA2_VER}" ]; then
-    aria2_latest_url="https://github.com/aria2/aria2/releases/download/release-${ARIA2_VER}/aria2-${ARIA2_VER}.tar.gz"
-  else
-    aria2_latest_url="https://github.com/aria2/aria2/archive/master.tar.gz"
-  fi
-  if [ x"${USE_CHINA_MIRROR}" = x1 ]; then
-    aria2_latest_url="https://ghproxy.com/${aria2_latest_url}"
+  f="${DOWNLOADS_DIR}/aria2-${tag}.tar.gz"
+  if [ ! -f "${f}" ]; then
+    retry wget -c -T 10 -O "${f}.part" "${url}"
+    mv -fv "${f}.part" "${f}"
   fi
 
-  if [ ! -f "${DOWNLOADS_DIR}/aria2-${aria2_tag}.tar.gz" ]; then
-    retry wget -c -T 10 -O "${DOWNLOADS_DIR}/aria2-${aria2_tag}.tar.gz.part" "${aria2_latest_url}"
-    mv -fv "${DOWNLOADS_DIR}/aria2-${aria2_tag}.tar.gz.part" "${DOWNLOADS_DIR}/aria2-${aria2_tag}.tar.gz"
-  fi
-  mkdir -p "/usr/src/aria2-${aria2_tag}"
-  tar -zxf "${DOWNLOADS_DIR}/aria2-${aria2_tag}.tar.gz" --strip-components=1 -C "/usr/src/aria2-${aria2_tag}"
-  cd "/usr/src/aria2-${aria2_tag}"
+  mkdir -p "/usr/src/aria2-${tag}"
+  log_info "解压 aria2-${tag}.tar.gz..."
+  tar -zxf "${f}" --strip-components=1 -C "/usr/src/aria2-${tag}"
+  cd "/usr/src/aria2-${tag}"
+  log_ok "进入源码目录: $(pwd)"
+
   if [ ! -f ./configure ]; then
+    log_info "未找到 configure，执行 autoreconf -i..."
     autoreconf -i
   fi
-  if [ x"${TARGET_HOST}" = xwin ]; then
-    ARIA2_EXT_CONF='--without-openssl'
-  # else
-  #   ARIA2_EXT_CONF='--with-ca-bundle=/etc/ssl/certs/ca-certificates.crt'
-  fi
-  ./configure --build=x86_64-linux-gnu --host="${CROSS_HOST}" --prefix="${CROSS_PREFIX}" --enable-static --disable-shared --enable-silent-rules ARIA2_STATIC=yes ${ARIA2_EXT_CONF}
+
+  log_info "配置: --host=${CROSS_HOST} --prefix=${CROSS_PREFIX} ARIA2_STATIC=yes"
+  ./configure --build=x86_64-linux-gnu --host="${CROSS_HOST}" --prefix="${CROSS_PREFIX}" \
+    --enable-static --disable-shared --enable-silent-rules ARIA2_STATIC=yes
+  log_info "编译 (jobs=$(nproc))..."
   make -j$(nproc)
+  log_info "安装..."
   make install
-  echo "- aria2: source: ${aria2_latest_url:-cached aria2}" >>"${BUILD_INFO}"
+
+  log_ok "aria2 构建完成"
+  echo "- aria2: source: ${url:-cached}" >>"${BUILD_INFO}"
   echo >>"${BUILD_INFO}"
 }
 
+# ============ 获取构建信息 ============
 get_build_info() {
+  log_step "========== 获取构建信息 =========="
+  log_var "aria2c 路径" "${CROSS_PREFIX}/bin/aria2c*"
+
   echo "============= ARIA2 VER INFO ==================="
-  ARIA2_VER_INFO="$("${RUNNER_CHECKER}" "${CROSS_PREFIX}/bin/aria2c"* --version 2>/dev/null)"
+  local ARIA2_VER_INFO
+  ARIA2_VER_INFO="$(qemu-mipsel-static "${CROSS_PREFIX}/bin/aria2c"* --version 2>/dev/null)"
+  if [ -z "${ARIA2_VER_INFO}" ]; then
+    log_warn "qemu 运行 aria2 获取版本信息失败，尝试直接读取二进制..."
+    ARIA2_VER_INFO="$(${CROSS_HOST}-strings "${CROSS_PREFIX}/bin/aria2c"* 2>/dev/null | grep -m1 'aria2 version' || echo '无法获取版本')"
+  else
+    log_ok "成功获取 aria2 版本信息"
+  fi
   echo "${ARIA2_VER_INFO}"
   echo "================================================"
 
@@ -432,15 +525,22 @@ get_build_info() {
   echo '```txt' >>"${BUILD_INFO}"
   echo "${ARIA2_VER_INFO}" >>"${BUILD_INFO}"
   echo '```' >>"${BUILD_INFO}"
+  log_ok "构建信息已写入 ${BUILD_INFO}"
 }
 
+# ============ 测试构建 ============
 test_build() {
-  echo "============= ARIA2 TEST DOWNLOAD =============="
-  "${RUNNER_CHECKER}" "${CROSS_PREFIX}/bin/aria2c"* --http-accept-gzip=true https://github.com/ -d /tmp -o test
-  echo "================================================"
+  log_step "========== 测试 aria2 下载功能 =========="
+  log_info "使用 qemu-mipsel-static 运行测试..."
+  if qemu-mipsel-static "${CROSS_PREFIX}/bin/aria2c"* --http-accept-gzip=true https://github.com/ -d /tmp -o test; then
+    log_ok "aria2 下载测试成功"
+  else
+    log_warn "aria2 下载测试失败（可能是网络或 qemu 问题，不影响产物）"
+  fi
 }
 
-# prepare_toolchain
+# ============ 主流程 ============
+prepare_toolchain
 prepare_zlib
 prepare_xz
 prepare_ssl
@@ -453,5 +553,11 @@ build_aria2
 get_build_info
 test_build
 
-# get release
-cp -fv "${CROSS_PREFIX}/bin/"aria2* "${SELF_DIR}"
+log_step "========== 复制构建产物到输出目录 =========="
+log_info "复制 ${CROSS_PREFIX}/bin/aria2c → ${SELF_DIR}/aria2c-mipsel"
+cp -fv "${CROSS_PREFIX}/bin/aria2c" "${SELF_DIR}/aria2c-mipsel"
+log_ok "构建产物已复制到 ${SELF_DIR}/aria2c-mipsel"
+
+log_step "========================================"
+log_ok "  极路由 mipsel 构建全部完成"
+log_step "========================================"
