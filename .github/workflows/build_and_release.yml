@@ -15,36 +15,77 @@ on:
     - cron: "0 0 * * 6"
 
 jobs:
+  resolve-versions:
+    name: Resolve Dependency Versions
+    runs-on: ubuntu-latest
+    outputs:
+      ZLIB_NG_TAG: ${{ steps.versions.outputs.ZLIB_NG_TAG }}
+      ZLIB_TAG: ${{ steps.versions.outputs.ZLIB_TAG }}
+      XZ_TAG: ${{ steps.versions.outputs.XZ_TAG }}
+      OPENSSL_TAG: ${{ steps.versions.outputs.OPENSSL_TAG }}
+      LIBRESSL_TAG: ${{ steps.versions.outputs.LIBRESSL_TAG }}
+      LIBXML2_TAG: ${{ steps.versions.outputs.LIBXML2_TAG }}
+      SQLITE_TAG: ${{ steps.versions.outputs.SQLITE_TAG }}
+      CARES_TAG: ${{ steps.versions.outputs.CARES_TAG }}
+      LIBSSH2_TAG: ${{ steps.versions.outputs.LIBSSH2_TAG }}
+    steps:
+      - name: Fetch latest dependency versions
+        id: versions
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq curl
+
+          fetch_tag() {
+            local repo="$1"
+            local resp
+            resp=$(curl -fsS "https://api.github.com/repos/${repo}/releases")
+            echo "$resp" | jq -r '.[0].tag_name'
+          }
+
+          ZLIB_NG_TAG_VAL=$(fetch_tag zlib-ng/zlib-ng)
+          ZLIB_TAG_VAL=$(fetch_tag madler/zlib)
+          XZ_TAG_VAL="5.8.0"
+          OPENSSL_TAG_VAL=$(fetch_tag openssl/openssl)
+          LIBRESSL_TAG_VAL=$(fetch_tag libressl/libressl)
+          LIBXML2_TAG_VAL=$(fetch_tag GNOME/libxml2)
+          SQLITE_TAG_VAL=$(fetch_tag sqlite/sqlite)
+          CARES_TAG_VAL=$(fetch_tag c-ares/c-ares)
+          LIBSSH2_TAG_VAL=$(fetch_tag libssh2/libssh2)
+
+          echo "ZLIB_NG_TAG=${ZLIB_NG_TAG_VAL}" >> $GITHUB_OUTPUT
+          echo "ZLIB_TAG=${ZLIB_TAG_VAL}" >> $GITHUB_OUTPUT
+          echo "XZ_TAG=${XZ_TAG_VAL}" >> $GITHUB_OUTPUT
+          echo "OPENSSL_TAG=${OPENSSL_TAG_VAL}" >> $GITHUB_OUTPUT
+          echo "LIBRESSL_TAG=${LIBRESSL_TAG_VAL}" >> $GITHUB_OUTPUT
+          echo "LIBXML2_TAG=${LIBXML2_TAG_VAL}" >> $GITHUB_OUTPUT
+          echo "SQLITE_TAG=${SQLITE_TAG_VAL}" >> $GITHUB_OUTPUT
+          echo "CARES_TAG=${CARES_TAG_VAL}" >> $GITHUB_OUTPUT
+          echo "LIBSSH2_TAG=${LIBSSH2_TAG_VAL}" >> $GITHUB_OUTPUT
+
+          echo "=== Resolved Versions ==="
+          echo "zlib-ng:    ${ZLIB_NG_TAG_VAL}"
+          echo "zlib:       ${ZLIB_TAG_VAL}"
+          echo "xz:         ${XZ_TAG_VAL}"
+          echo "openssl:    ${OPENSSL_TAG_VAL}"
+          echo "libressl:   ${LIBRESSL_TAG_VAL}"
+          echo "libxml2:    ${LIBXML2_TAG_VAL}"
+          echo "sqlite:     ${SQLITE_TAG_VAL}"
+          echo "c-ares:     ${CARES_TAG_VAL}"
+          echo "libssh2:    ${LIBSSH2_TAG_VAL}"
+
   create-prerelease:
     name: Create Prerelease
-#     if: github.event_name == 'push' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:
       - name: Installation depends
         run: |
           sudo apt-get update
           sudo apt-get upgrade
-#       - name: Set current date as env variable
-#         run: echo "NOW=$(date --utc)" >> $GITHUB_ENV
-#       - uses: dev-drprasad/delete-tag-and-release@v0.2.1
-#         with:
-#           delete_release: true
-#           tag_name: continuous
-#         env:
-#           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-#       - name: Create Prerelease Tag
-#         id: create_prerelease_tag
-#         uses: softprops/action-gh-release@v1
-#         with:
-#           prerelease: true
-#           draft: false
-#           tag_name: continuous
-#           name: Continuous build
-#           body: |
-#             Building time: ${{ env.NOW }}
-#             - - -
 
   static-build:
+    name: "Build ${{ matrix.cross_host }} (libressl=${{ matrix.use_libressl }})"
+    needs: resolve-versions
     runs-on: ubuntu-latest
     container: "abcfy2/muslcc-toolchain-ubuntu:${{ matrix.cross_host }}"
     strategy:
@@ -53,13 +94,26 @@ jobs:
         cross_host:
           - arm-linux-musleabi
           - aarch64-linux-musl
-#           - mips-linux-musl
-#           - mipsel-linux-musl
-#           - mips64-linux-musl
           - x86_64-linux-musl
           - x86_64-w64-mingw32
           - i686-w64-mingw32
         use_libressl: [0, 1]
+        include:
+          - cross_host: arm-linux-musleabi
+            openssl_compiler: linux-armv4
+            target_host: linux
+          - cross_host: aarch64-linux-musl
+            openssl_compiler: linux-aarch64
+            target_host: linux
+          - cross_host: x86_64-linux-musl
+            openssl_compiler: linux-x86_64
+            target_host: linux
+          - cross_host: x86_64-w64-mingw32
+            openssl_compiler: mingw64
+            target_host: win
+          - cross_host: i686-w64-mingw32
+            openssl_compiler: mingw64
+            target_host: win
         exclude:
           - cross_host: x86_64-w64-mingw32
             use_libressl: 1
@@ -68,24 +122,39 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - uses: actions/cache@v4
+
+      - name: Cache downloads
+        uses: actions/cache@v4
         id: cache
         with:
           path: downloads/
-          key: build-cache-${{ matrix.cross_host }}-${{ github.sha }}
+          key: build-cache-${{ matrix.cross_host }}-${{ matrix.use_libressl }}-${{ github.sha }}
           restore-keys: |
-            build-cache-${{ matrix.cross_host }}-
-      - name: compile
+            build-cache-${{ matrix.cross_host }}-${{ matrix.use_libressl }}-
+
+      - name: Compile
         env:
           CROSS_HOST: "${{ matrix.cross_host }}"
+          OPENSSL_COMPILER: "${{ matrix.openssl_compiler }}"
+          TARGET_HOST: "${{ matrix.target_host }}"
           USE_LIBRESSL: "${{ matrix.use_libressl }}"
+          DEP_ZLIB_NG_TAG: ${{ needs.resolve-versions.outputs.ZLIB_NG_TAG }}
+          DEP_ZLIB_TAG: ${{ needs.resolve-versions.outputs.ZLIB_TAG }}
+          DEP_XZ_TAG: ${{ needs.resolve-versions.outputs.XZ_TAG }}
+          DEP_OPENSSL_TAG: ${{ needs.resolve-versions.outputs.OPENSSL_TAG }}
+          DEP_LIBRESSL_TAG: ${{ needs.resolve-versions.outputs.LIBRESSL_TAG }}
+          DEP_LIBXML2_TAG: ${{ needs.resolve-versions.outputs.LIBXML2_TAG }}
+          DEP_SQLITE_TAG: ${{ needs.resolve-versions.outputs.SQLITE_TAG }}
+          DEP_CARES_TAG: ${{ needs.resolve-versions.outputs.CARES_TAG }}
+          DEP_LIBSSH2_TAG: ${{ needs.resolve-versions.outputs.LIBSSH2_TAG }}
         run: |
           if [ "${GITHUB_EVENT_NAME}" = release ]; then
             export ARIA2_VER="${GITHUB_REF#refs/*/}"
             echo "ARIA2_VER=${ARIA2_VER}" >> $GITHUB_ENV
           fi
           "${GITHUB_WORKSPACE}/build.sh"
-      - name: zip archiving
+
+      - name: Zip archive
         env:
           CROSS_HOST: "${{ matrix.cross_host }}"
           USE_LIBRESSL: "${{ matrix.use_libressl }}"
@@ -98,26 +167,8 @@ jobs:
           fi
           echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> $GITHUB_ENV
           zip -j9v "/tmp/${ARCHIVE_NAME}" "${GITHUB_WORKSPACE}"/aria2c*
-#       - name: Prerelease assets
-#         if: github.event_name == 'push' || github.event_name == 'schedule'
-#         uses: softprops/action-gh-release@v1
-#         with:
-#           files: /tmp/${{ env.ARCHIVE_NAME }}
-#           prerelease: true
-#           draft: false
-#           tag_name: continuous
-#           name: Continuous build
-#           body_path: "${{ github.workspace }}/build_info.md"
-#           append_body: true
-#       - name: Upload Github Assets
-#         if: startsWith(github.ref, 'refs/tags/')
-#         uses: softprops/action-gh-release@v1
-#         with:
-#           files: /tmp/${{ env.ARCHIVE_NAME }}
-#           name: aria2 ${{ env.ARIA2_VER }} static release
-#           body_path: "${{ github.workspace }}/build_info.md"
-#           append_body: true
-      - name : Upload artifact
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARCHIVE_NAME }}
