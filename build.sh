@@ -174,7 +174,8 @@ prepare_toolchain() {
 
 prepare_zlib() {
   if [ x"${USE_ZLIB_NG}" = x"1" ]; then
-    zlib_ng_latest_tag="$(retry wget -qO- --compression=auto https://api.github.com/repos/zlib-ng/zlib-ng/releases \| jq -r "'.[0].tag_name'")"
+    _api_resp="$(retry wget -qO- --compression=auto https://api.github.com/repos/zlib-ng/zlib-ng/releases)"
+    zlib_ng_latest_tag="$(echo "${_api_resp}" | jq -r "'.[0].tag_name'")"
     zlib_ng_latest_url="https://github.com/zlib-ng/zlib-ng/archive/refs/tags/${zlib_ng_latest_tag}.tar.gz"
     if [ x"${USE_CHINA_MIRROR}" = x1 ]; then
       zlib_ng_latest_url="https://ghproxy.com/${zlib_ng_latest_url}"
@@ -194,7 +195,8 @@ prepare_zlib() {
     # Fix mingw build sharedlibdir lost issue
     sed -i 's@^sharedlibdir=.*@sharedlibdir=${libdir}@' "${CROSS_PREFIX}/lib/pkgconfig/zlib.pc"
   else
-    zlib_tag="$(retry wget -qO- --compression=auto https://api.github.com/repos/madler/zlib/releases \| jq -r "'.[0].tag_name'")"
+    _api_resp="$(retry wget -qO- --compression=auto https://api.github.com/repos/madler/zlib/releases)"
+    zlib_tag="$(echo "${_api_resp}" | jq -r "'.[0].tag_name'")"
     zlib_latest_url="https://github.com/madler/zlib/archive/refs/tags/${zlib_tag}.tar.gz"
     if [ ! -f "${DOWNLOADS_DIR}/zlib-${zlib_tag}.tar.gz" ]; then
       retry wget -cT10 -O "${DOWNLOADS_DIR}/zlib-${zlib_tag}.tar.gz.part" "${zlib_latest_url}"
@@ -239,7 +241,8 @@ prepare_ssl() {
   if [ x"${TARGET_HOST}" != xwin ]; then
     if [ x"${USE_LIBRESSL}" = x1 ]; then
       # libressl
-      libressl_tag="$(retry wget -qO- --compression=auto https://api.github.com/repos/libressl/libressl/releases \| jq -r "'.[0].tag_name'")"
+      _api_resp="$(retry wget -qO- --compression=auto https://api.github.com/repos/libressl/libressl/releases)"
+      libressl_tag="$(echo "${_api_resp}" | jq -r "'.[0].tag_name'")"
       libressl_latest_url="https://github.com/libressl/libressl/archive/refs/tags/${libressl_tag}.tar.gz"
       if [ x"${USE_CHINA_MIRROR}" = x1 ]; then
         libressl_latest_url="https://mirror.sjtu.edu.cn/OpenBSD/LibreSSL/libressl-${libressl_tag}.tar.gz"
@@ -261,7 +264,8 @@ prepare_ssl() {
       echo "- libressl: ${libressl_ver}, source: ${libressl_latest_url:-cached libressl}" >>"${BUILD_INFO}"
     else
       # openssl
-      openssl_filename="$(retry wget -qO- --compression=auto https://api.github.com/repos/openssl/openssl/releases \| jq -r ".[0].tag_name")"
+      _api_resp="$(retry wget -qO- --compression=auto https://api.github.com/repos/openssl/openssl/releases)"
+      openssl_filename="$(echo "${_api_resp}" | jq -r ".[0].tag_name")"
       openssl_ver="$(echo "${openssl_filename}" | sed -r 's/openssl-(.+)/\1/')"
       openssl_latest_url="https://github.com/openssl/openssl/archive/refs/tags/${openssl_filename}.tar.gz"
       if [ x"${USE_CHINA_MIRROR}" = x1 ]; then
@@ -284,15 +288,16 @@ prepare_ssl() {
 }
 
 prepare_libxml2() {
-  libxml2_latest_url="$(retry wget -qO- --compression=auto 'https://gitlab.gnome.org/api/graphql' --header="'Content-Type: application/json'" --post-data="'{\"query\":\"query {project(fullPath:\\\"GNOME/libxml2\\\"){releases(first:1,sort:RELEASED_AT_DESC){nodes{assets{links{nodes{directAssetUrl}}}}}}}\"}'" \| jq -r "'.data.project.releases.nodes[0].assets.links.nodes[0].directAssetUrl'")"
-  libxml2_tag="$(echo "${libxml2_latest_url}" | sed -r 's/.*libxml2-(.+).tar.*/\1/')"
-  libxml2_filename="$(echo "${libxml2_latest_url}" | sed -r 's/.*(libxml2-(.+).tar.*)/\1/')"
+  _api_resp="$(retry wget -qO- --compression=auto https://api.github.com/repos/GNOME/libxml2/releases)"
+  libxml2_tag="$(echo "${_api_resp}" | jq -r "'.[0].tag_name'")"
+  libxml2_latest_url="https://github.com/GNOME/libxml2/archive/refs/tags/${libxml2_tag}.tar.gz"
+  libxml2_filename="libxml2-${libxml2_tag}.tar.gz"
   if [ ! -f "${DOWNLOADS_DIR}/${libxml2_filename}" ]; then
     retry wget -c -O "${DOWNLOADS_DIR}/${libxml2_filename}.part" "${libxml2_latest_url}"
     mv -fv "${DOWNLOADS_DIR}/${libxml2_filename}.part" "${DOWNLOADS_DIR}/${libxml2_filename}"
   fi
   mkdir -p "/usr/src/libxml2-${libxml2_tag}"
-  tar -axf "${DOWNLOADS_DIR}/${libxml2_filename}" --strip-components=1 -C "/usr/src/libxml2-${libxml2_tag}"
+  tar -zxf "${DOWNLOADS_DIR}/${libxml2_filename}" --strip-components=1 -C "/usr/src/libxml2-${libxml2_tag}"
   cd "/usr/src/libxml2-${libxml2_tag}"
   ./configure --build=x86_64-linux-gnu --host="${CROSS_HOST}" --prefix="${CROSS_PREFIX}" --enable-silent-rules --without-python --without-icu --enable-static --disable-shared
   make -j$(nproc)
@@ -302,8 +307,9 @@ prepare_libxml2() {
 }
 
 prepare_sqlite() {
-  sqlite_tag="$(wget -qO- --compression=auto https://www.sqlite.org/index.html | sed -nr 's/.*>Version (.+)<.*/\1/p')"
-  sqlite_latest_url="https://github.com/sqlite/sqlite/archive/release.tar.gz"
+  _api_resp="$(retry wget -qO- --compression=auto https://api.github.com/repos/sqlite/sqlite/releases)"
+  sqlite_tag="$(echo "${_api_resp}" | jq -r "'.[0].tag_name'")"
+  sqlite_latest_url="https://github.com/sqlite/sqlite/archive/refs/tags/${sqlite_tag}.tar.gz"
   if [ x"${USE_CHINA_MIRROR}" = x1 ]; then
     sqlite_latest_url="https://ghproxy.com/${sqlite_latest_url}"
   fi
@@ -326,9 +332,9 @@ prepare_sqlite() {
 }
 
 prepare_c_ares() {
-  cares_tag="$(retry wget -qO- --compression=auto https://c-ares.org/ \| sed -nr "'s@.*<a href=\"/download/.*\">c-ares (.+)</a>.*@\1@p'")"
-  cares_latest_url="https://c-ares.org/download/c-ares-${cares_tag}.tar.gz"
-  # cares_latest_url="https://github.com/c-ares/c-ares/archive/main.tar.gz"
+  _api_resp="$(retry wget -qO- --compression=auto https://api.github.com/repos/c-ares/c-ares/releases)"
+  cares_tag="$(echo "${_api_resp}" | jq -r "'.[0].tag_name'")"
+  cares_latest_url="https://github.com/c-ares/c-ares/archive/refs/tags/${cares_tag}.tar.gz"
   if [ ! -f "${DOWNLOADS_DIR}/c-ares-${cares_tag}.tar.gz" ]; then
     retry wget -cT10 -O "${DOWNLOADS_DIR}/c-ares-${cares_tag}.tar.gz.part" "${cares_latest_url}"
     mv -fv "${DOWNLOADS_DIR}/c-ares-${cares_tag}.tar.gz.part" "${DOWNLOADS_DIR}/c-ares-${cares_tag}.tar.gz"
@@ -347,8 +353,9 @@ prepare_c_ares() {
 }
 
 prepare_libssh2() {
-  libssh2_tag="$(retry wget -qO- --compression=auto https://www.libssh2.org/ \| sed -nr "'s@.*The latest release:.*download/libssh2-(.+).tar.gz.*@\1@p'")"
-  libssh2_latest_url="https://www.libssh2.org/download/libssh2-${libssh2_tag}.tar.gz"
+  _api_resp="$(retry wget -qO- --compression=auto https://api.github.com/repos/libssh2/libssh2/releases)"
+  libssh2_tag="$(echo "${_api_resp}" | jq -r "'.[0].tag_name'")"
+  libssh2_latest_url="https://github.com/libssh2/libssh2/archive/refs/tags/${libssh2_tag}.tar.gz"
   if [ ! -f "${DOWNLOADS_DIR}/libssh2-${libssh2_tag}.tar.gz" ]; then
     retry wget -cT10 -O "${DOWNLOADS_DIR}/libssh2-${libssh2_tag}.tar.gz.part" "${libssh2_latest_url}"
     mv -fv "${DOWNLOADS_DIR}/libssh2-${libssh2_tag}.tar.gz.part" "${DOWNLOADS_DIR}/libssh2-${libssh2_tag}.tar.gz"
